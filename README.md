@@ -198,8 +198,6 @@ publishChannels
 
 ; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
 if $CH5==0 then PinDeepSleep 600
-```
-
 ### How to Control Sleep Mode from Home Assistant
-* **Normal Battery Operation (Deep Sleep)**: Leave **"Stay Awake"** switch in Home Assistant **OFF**. The sensor will sleep, waking every 10 minutes (or on P20 button press) to transmit data.
-* **Configuration / Update Mode**: Turn **"Stay Awake"** switch in Home Assistant **ON**. The next time the device wakes up (or when you tap the button), it will see the switch is ON, skip deep sleep, and remain permanently reachable at `http://192.168.20.20/`.
+* **Normal Battery Operation (Deep Sleep)**: Leave **"Stay Awake"** switch in Home Assistant **`OFF`**. The sensor will sleep, waking every 10 minutes to transmit data.
+* **Configuration / Update Mode**: Turn **"Stay Awake"** switch in Home Assistant **`ON`**. Thanks to `optimistic: true` and `retain: true`, Home Assistant retains the command on the MQTT broker. The next time the sensor wakes up, it reads `$CH5 == 1`, skips deep sleep, and remains permanently online at `http://192.168.20.20/`.
