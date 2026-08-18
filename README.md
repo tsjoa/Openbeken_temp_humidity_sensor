@@ -182,13 +182,29 @@ DSEdge 1 20
 waitFor WiFiState 4
 waitFor MQTTState 1
 
-; Capture sensor reading and publish to Home Assistant
+; Capture fresh sensor and battery readings
+battery_measure
 SHT_Measure
+delay_ms 250
+
+; Publish channel data to MQTT
 publishChannels
+
+; Allow TCP/MQTT network buffer to flush over RF before powering off radio
+delay_s 2
 
 ; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
 if $CH5==0 then PinDeepSleep 600
 ```
+
+### Critical Timing & Buffer Pitfalls
+
+#### Why Auto-Wake Temperature Was Stale (The Network TX Race Condition)
+* **The Symptom**: When waking up automatically every 10 minutes, the sensor reported the exact same temperature as the previous cycle, but pressing the button yielded a fresh reading.
+* **The Cause**: `publishChannels` enqueues MQTT messages into lwIP's TCP transmit buffer asynchronously. Without a delay, `PinDeepSleep` was executed microseconds later, powering off the 2.4GHz RF transceiver before the TCP packet left the device over Wi-Fi. Mosquitto never received the new packet, leaving Home Assistant displaying the last retained value. Pressing the physical button triggered `toggleChannel 5` (`$CH5 == 1`), skipping deep sleep and keeping the radio active long enough to flush the queue.
+* **The Fix**:
+  1. `battery_measure` & `SHT_Measure` followed by `delay_ms 250` ensure the I2C measurement and ADC conversion are complete before values are formatted.
+  2. `publishChannels` followed by `delay_s 2` ensures the full TCP packet exchange (Wi-Fi frame transmission and MQTT PUBACK) completes before the radio is powered down.
 
 ### Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
 
