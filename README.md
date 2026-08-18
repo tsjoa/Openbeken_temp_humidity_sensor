@@ -145,21 +145,8 @@ curl -s "http://192.168.20.20/ha_discovery?prefix=homeassistant"
 ### Why Entities Become "Unavailable"
 By default, Home Assistant tracks device online status using MQTT's **Last Will and Testament (LWT)** on the availability topic (`tuya_temp_hum/connected`). When the sensor enters deep sleep, its TCP connection closes, causing Mosquitto to broadcast `offline`. Home Assistant then greys out the sensor cards and marks them as **"Unavailable"** until the next wake-up.
 
-### The Fix: OpenBeken Flag 24 (Omit Availability Topic)
-Enabling **Flag 24** instructs OpenBeken to omit `availability_topic` from Home Assistant Auto-Discovery. Home Assistant will then **permanently display the last received values** (temperature, humidity, voltage) instead of flipping to "Unavailable".
-
-#### Enabling Flag 24:
-1. In OpenBeken Web UI: Go to **Config $\rightarrow$ Configure General/Flags** and check **Flag 24 - [HA] Discovery - do not use availability_topic**.
-2. Or run via console / startup command:
-   ```bash
-   SetFlag 24 1
-   save
-   ```
-3. Re-trigger Home Assistant discovery:
-   ```bash
-   ha_discovery homeassistant
-   ```
-
+### The Fix: OpenBeken Flag 35 (Omit Availability Topic)
+Enabling **Flag 35** instructs OpenBeken to omit `availability_topic` (`avty_t`) from Home Assistant Auto-Discovery. Home Assistant will then **permanently display the last received values** (temperature, humidity, voltage, battery) on dashboard cards without flipping to "Unavailable".
 ---
 
 ## 6. Power Consumption, Thermals, and Deep Sleep
@@ -203,7 +190,20 @@ publishChannels
 if $CH5==0 then PinDeepSleep 600
 ```
 
-### Bidirectional Button & Home Assistant Operation
-* **Press Physical Button (When in Deep Sleep)**: Wakes up, toggles **"Stay Awake"** in Home Assistant to **`ON`**, and stays awake with the web UI active.
-* **Press Physical Button Again (When Awake)**: Toggles **"Stay Awake"** in Home Assistant to **`OFF`**, takes a final sensor reading, and puts the device back to sleep.
-* **Toggle in Home Assistant**: Flipping the switch in Home Assistant remotely changes the mode on the next wake-up.
+### Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
+
+Because the sensor is in low-power deep sleep for 99.7% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
+
+#### 1. Normal Battery Operation (Deep Sleep Mode - 6 to 12+ Months Battery Life):
+1. In Home Assistant, ensure the **"Stay Awake"** switch is set to **`OFF`**.
+2. Insert the batteries.
+3. The sensor boots, measures temperature/humidity/voltage, connects to Wi-Fi/MQTT, delivers its reading to Home Assistant in ~1.5 seconds, and enters low-power **Deep Sleep** ($~25\ \mu\text{A}$, completely cool to the touch).
+4. The sensor wakes automatically on its internal timer every **10 minutes** to refresh readings in Home Assistant. All cards remain visible and active continuously.
+
+#### 2. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
+1. In Home Assistant, toggle the **"Stay Awake"** switch to **`ON`** (the setting is retained on the MQTT broker).
+2. **Remove and reinsert one battery** to power-cycle the sensor.
+3. When the sensor boots and connects to MQTT, it reads `Stay Awake == ON`, skips deep sleep, and **stays online continuously at `http://192.168.20.20/`** with the full OpenBeken web panel and OTA interface active.
+4. When finished with configuration or firmware updates:
+   * Toggle **"Stay Awake"** back to **`OFF`** in Home Assistant.
+   * Remove and reinsert the battery to place the sensor back into battery-saving Deep Sleep mode.
