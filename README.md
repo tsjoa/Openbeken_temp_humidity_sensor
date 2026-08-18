@@ -169,12 +169,13 @@ Enabling **Flag 24** instructs OpenBeken to omit `availability_topic` from Home 
 ### Deep Sleep Solution (6–12+ Months Battery Life)
 In **Deep Sleep**, the SoC disables its radio and clocks, dropping power consumption to **$\approx 20\text{–}30\ \mu\text{A}$**. The device remains completely cold (room temperature) and wakes only for 1.5–2 seconds per cycle to transmit data.
 
-### Production `autoexec.bat` / Startup Script (with Button Wake & Safe Mode)
+### Production `autoexec.bat` / Startup Script (with Bidirectional Switch Sync)
 Set this script in OpenBeken (**Config $\rightarrow$ Change Startup Command Text**):
 
 ```batch
 ; Enable low power 802.11 modem sleep
 PowerSave 1
+
 ; Optimize MQTT and WiFi quick connect
 SetFlag 35 1
 SetFlag 7 1
@@ -185,7 +186,9 @@ startDriver SHT3X
 startDriver Battery
 Battery_Setup 2000 3000 2.29 2400 4096
 
-; Configure Pin 20 Button wake edge
+; Link physical Pin 20 button directly to Channel 5 (Stay Awake switch)
+addEventHandler OnClick 20 "toggleChannel 5"
+addEventHandler OnHold 20 "toggleChannel 5"
 DSEdge 1 20
 
 ; Wait for Wi-Fi and MQTT connection
@@ -198,6 +201,9 @@ publishChannels
 
 ; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
 if $CH5==0 then PinDeepSleep 600
-### How to Control Sleep Mode from Home Assistant
-* **Normal Battery Operation (Deep Sleep)**: Leave **"Stay Awake"** switch in Home Assistant **`OFF`**. The sensor will sleep, waking every 10 minutes to transmit data.
-* **Configuration / Update Mode**: Turn **"Stay Awake"** switch in Home Assistant **`ON`**. Thanks to `optimistic: true` and `retain: true`, Home Assistant retains the command on the MQTT broker. The next time the sensor wakes up, it reads `$CH5 == 1`, skips deep sleep, and remains permanently online at `http://192.168.20.20/`.
+```
+
+### Bidirectional Button & Home Assistant Operation
+* **Press Physical Button (When in Deep Sleep)**: Wakes up, toggles **"Stay Awake"** in Home Assistant to **`ON`**, and stays awake with the web UI active.
+* **Press Physical Button Again (When Awake)**: Toggles **"Stay Awake"** in Home Assistant to **`OFF`**, takes a final sensor reading, and puts the device back to sleep.
+* **Toggle in Home Assistant**: Flipping the switch in Home Assistant remotely changes the mode on the next wake-up.
