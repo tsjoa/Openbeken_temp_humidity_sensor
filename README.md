@@ -13,13 +13,12 @@ Comprehensive documentation for flashing, pinout configuration, Home Assistant M
 | **Sensor IC** | Sensirion SHT30 / SHT3x (I2C) |
 | **Power Supply** | 2x AAA Batteries (2.2V min to 3.0V max) |
 | **Status LED** | Red LED on **P26** (Active-High: 0V = OFF, 3.3V = ON) |
-| **Pair / Wake Button**| Momentary Tactile Switch on **P20** (Active-Low) |
+| **Pair / Wake Button**| Momentary Tactile Switch on **P20** (Verified active-low GPIO) |
 | **Sensor Power Switch**| Transistor switch on **P17** (Active-High: 3.3V powers the I2C bus & ADC divider) |
 | **Battery ADC** | Resistor divider connected to **P23 (ADC3)** |
 | **Profile Slug** | `tuya-generic-temperature-and-humidity-sensor-v1.1.17` |
 
 ---
-
 ## 2. Firmware Flashing: Migrating from ESPHome-Kickstart to OpenBeken
 
 ### Why Raw `.bin` / `.rbl` Uploads Failed
@@ -68,13 +67,12 @@ curl -s "http://192.168.20.20/index?restart=1"
 ## 3. OpenBeken Pinout & Channel Mapping
 
 The hardware pinout extracted from the factory Tuya device profile (`tuya-generic-temperature-and-humidity-sensor-v1.1.17`):
-
 | Pin | OpenBeken Role | Role ID | Channels | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **P7** | `SHT3X_SCK` | 49 | — | I2C Clock |
 | **P8** | `SHT3X_SDA` | 48 | **Ch 1, Ch 2** | I2C Data (Channel 1 = Temp, Channel 2 = Humidity) |
 | **P17**| `AlwaysHigh` | 34 | — | Sensor & Battery ADC Power Rail Switch |
-| **P20**| `Btn_n` | 4 | **Ch 0** | Pairing / Wake / Safe-Mode Button (Active-Low) |
+| **P20**| `Btn_n` / `DoorSnsrWSleep` | 4 / 58 | **Ch 0** | Physical Button (Verified on P20) |
 | **P23**| `BAT_ADC` | 60 | **Ch 3** | Battery Voltage ADC (linked to Channel 3) |
 | **P26**| `AlwaysLow` | 35 | — | Red Status LED (0V = OFF, prevents parasitic drain) |
 | *All others* | ` ` (None) | 0 | — | Unassigned / High Impedance |
@@ -85,13 +83,12 @@ The hardware pinout extracted from the factory Tuya device profile (`tuya-generi
 * **Channel 3**: `Voltage` (Battery ADC voltage)
 
 ### OpenBeken CLI Configuration Commands
-```bash
 # Pin roles and channels
 SetPinRole 7 SHT3X_SCK
 SetPinRole 8 SHT3X_SDA
 SetPinChannel 8 1 2
 SetPinRole 17 AlwaysHigh
-SetPinRole 20 Btn_n
+SetPinRole 20 DoorSnsrWSleep
 SetPinRole 23 BAT_ADC
 SetPinChannel 23 3
 SetPinRole 26 AlwaysLow
@@ -133,39 +130,63 @@ curl -s "http://192.168.20.20/ha_discovery?prefix=homeassistant"
 
 ### Registered Home Assistant Entities (`device: obk55A19113`)
 
-| Entity ID | Name | Measurement | Unit |
+| Entity ID | Name | Type | Function |
 | :--- | :--- | :--- | :--- |
-| `sensor.obk55a19113_temperature` | Temperature | Ambient Temperature (SHT30) | `°C` |
-| `sensor.obk55a19113_humidity` | Humidity | Ambient Humidity (SHT30) | `%` |
-| `sensor.obk55a19113_voltage` | Voltage | Battery ADC Voltage | `mV` |
-| `sensor.obk55a19113_battery` | Battery | Battery Level | `%` |
-| `sensor.obk55a19113_temperature_3`| Temperature (Diag) | Internal SoC Die Temperature | `°C` |
-| `sensor.obk55a19113_rssi` | RSSI | Wi-Fi Signal Strength | `dBm` |
-| `sensor.obk55a19113_uptime` | Uptime | System Uptime | `s` |
-| `sensor.obk55a19113_ip` | IP | Device IP Address | — |
+| `switch.obk55a19113_stay_awake` | **Stay Awake** | Switch | Toggles between Deep Sleep (OFF) and Continuous Awake Mode (ON) |
+| `sensor.obk55a19113_temperature` | Temperature | Sensor | Ambient Temperature (SHT30) in `°C` |
+| `sensor.obk55a19113_humidity` | Humidity | Sensor | Ambient Humidity (SHT30) in `%` |
+| `sensor.obk55a19113_voltage` | Voltage | Sensor | Battery ADC Voltage in `mV` |
+| `sensor.obk55a19113_battery` | Battery | Sensor | Battery Level in `%` |
+| `sensor.obk55a19113_temperature_3`| Temperature (Diag) | Sensor | Internal SoC Die Temperature in `°C` |
+| `sensor.obk55a19113_rssi` | RSSI | Sensor | Wi-Fi Signal Strength in `dBm` |
+| `sensor.obk55a19113_uptime` | Uptime | Sensor | System Uptime in `s` |
+| `sensor.obk55a19113_ip` | IP | Sensor | Device IP Address |
+
+### Why Entities Become "Unavailable"
+By default, Home Assistant tracks device online status using MQTT's **Last Will and Testament (LWT)** on the availability topic (`tuya_temp_hum/connected`). When the sensor enters deep sleep, its TCP connection closes, causing Mosquitto to broadcast `offline`. Home Assistant then greys out the sensor cards and marks them as **"Unavailable"** until the next wake-up.
+
+### The Fix: OpenBeken Flag 24 (Omit Availability Topic)
+Enabling **Flag 24** instructs OpenBeken to omit `availability_topic` from Home Assistant Auto-Discovery. Home Assistant will then **permanently display the last received values** (temperature, humidity, voltage) instead of flipping to "Unavailable".
+
+#### Enabling Flag 24:
+1. In OpenBeken Web UI: Go to **Config $\rightarrow$ Configure General/Flags** and check **Flag 24 - [HA] Discovery - do not use availability_topic**.
+2. Or run via console / startup command:
+   ```bash
+   SetFlag 24 1
+   save
+   ```
+3. Re-trigger Home Assistant discovery:
+   ```bash
+   ha_discovery homeassistant
+   ```
 
 ---
 
-## 5. Power Consumption, Thermals, and Deep Sleep
+## 6. Power Consumption, Thermals, and Deep Sleep
 
 ### The Always-On Problem (Why the chip feels warm)
 * In **Always-On** mode, the Wi-Fi transceiver and CPU run 24/7, drawing **80–100 mA** continuous current ($~0.3\text{ W}$).
-* Inside the compact enclosed sensor casing, this heats the silicon die to **$\approx 45^\circ\text{C}$** (visible under `sensor.obk55a19113_temperature_3`) and exhausts standard AAA batteries in **12 to 15 hours**.
-
 ### Deep Sleep Solution (6–12+ Months Battery Life)
 In **Deep Sleep**, the SoC disables its radio and clocks, dropping power consumption to **$\approx 20\text{–}30\ \mu\text{A}$**. The device remains completely cold (room temperature) and wakes only for 1.5–2 seconds per cycle to transmit data.
 
-### Production `autoexec.bat` / Startup Script
+### Production `autoexec.bat` / Startup Script (with Button Wake & Safe Mode)
 Set this script in OpenBeken (**Config $\rightarrow$ Change Startup Command Text**):
 
 ```batch
 ; Enable low power 802.11 modem sleep
 PowerSave 1
+; Optimize MQTT and WiFi quick connect
+SetFlag 35 1
+SetFlag 7 1
+SetFlag 37 1
 
 ; Start drivers
 startDriver SHT3X
 startDriver Battery
 Battery_Setup 2000 3000 2.29 2400 4096
+
+; Configure Pin 20 Button wake edge
+DSEdge 1 20
 
 ; Wait for Wi-Fi and MQTT connection
 waitFor WiFiState 4
@@ -175,14 +196,10 @@ waitFor MQTTState 1
 SHT_Measure
 publishChannels
 
-; Enter Deep Sleep for 10 minutes (600 seconds)
-DeepSleep 600
+; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
+if $CH5==0 then PinDeepSleep 600
 ```
 
-### Safe Mode Recovery (Accessing Web UI after Deep Sleep is Enabled)
-Once `DeepSleep` is active, the web server is offline while sleeping. If you need to access the web UI at `http://192.168.20.20/` again:
-1. Remove one AAA battery.
-2. **Press and hold the physical button (P20)**.
-3. Reinsert the battery while keeping the button held for 3–5 seconds.
-4. OpenBeken will boot into **Safe Mode**, keeping the web server active and disabling the sleep timer so you can reconfigure or update firmware.
-# Openbeken_temp_humidity_sensor
+### How to Control Sleep Mode from Home Assistant
+* **Normal Battery Operation (Deep Sleep)**: Leave **"Stay Awake"** switch in Home Assistant **OFF**. The sensor will sleep, waking every 10 minutes (or on P20 button press) to transmit data.
+* **Configuration / Update Mode**: Turn **"Stay Awake"** switch in Home Assistant **ON**. The next time the device wakes up (or when you tap the button), it will see the switch is ON, skip deep sleep, and remain permanently reachable at `http://192.168.20.20/`.
