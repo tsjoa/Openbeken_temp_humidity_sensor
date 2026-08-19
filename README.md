@@ -187,8 +187,11 @@ battery_measure
 SHT_Measure
 delay_ms 250
 
-; Publish channel data to MQTT
+; Publish channel data and named sensor topics to MQTT
 publishChannels
+publishFloat "temperature" $CH1
+publishFloat "humidity" $CH2
+publishFloat "voltage" $CH3
 
 ; Allow TCP/MQTT network buffer to flush over RF before powering off radio
 delay_s 2
@@ -199,13 +202,15 @@ if $CH5==0 then PinDeepSleep 600
 
 ### Critical Timing & Buffer Pitfalls
 
-#### Why Auto-Wake Temperature Was Stale (The Network TX Race Condition)
-* **The Symptom**: When waking up automatically every 10 minutes, the sensor reported the exact same temperature as the previous cycle, but pressing the button yielded a fresh reading.
-* **The Cause**: `publishChannels` enqueues MQTT messages into lwIP's TCP transmit buffer asynchronously. Without a delay, `PinDeepSleep` was executed microseconds later, powering off the 2.4GHz RF transceiver before the TCP packet left the device over Wi-Fi. Mosquitto never received the new packet, leaving Home Assistant displaying the last retained value. Pressing the physical button triggered `toggleChannel 5` (`$CH5 == 1`), skipping deep sleep and keeping the radio active long enough to flush the queue.
+#### Why Auto-Wake Readings (Temperature & Humidity) Were Stale (Network TX & Topic Mapping)
+* **The Symptom**: When waking up automatically every 10 minutes, the sensor reported the exact same temperature and/or humidity as the previous cycle, but pressing the button yielded fresh readings.
+* **The Cause**:
+  1. **Network TX Buffer Race**: `publishChannels` enqueues MQTT packets into lwIP's TCP transmit buffer asynchronously. Without a delay, `PinDeepSleep` was executed microseconds later, powering off the 2.4GHz RF transceiver before the full TCP packet stream (specifically subsequent humidity and voltage packets) left the device over Wi-Fi. Mosquitto never received the newer packets, leaving Home Assistant displaying the last retained value.
+  2. **Topic Binding Differences**: Home Assistant discovery configurations can bind sensor entities to either generic numeric channel topics (`tuya_temp_hum/1/get`, `tuya_temp_hum/2/get`) or explicit named topics (`tuya_temp_hum/temperature/get`, `tuya_temp_hum/humidity/get`). Relying on only one mechanism can cause Home Assistant to miss channel updates if the discovery schema expects named topics.
 * **The Fix**:
-  1. `battery_measure` & `SHT_Measure` followed by `delay_ms 250` ensure the I2C measurement and ADC conversion are complete before values are formatted.
-  2. `publishChannels` followed by `delay_s 2` ensures the full TCP packet exchange (Wi-Fi frame transmission and MQTT PUBACK) completes before the radio is powered down.
-
+  1. `battery_measure` & `SHT_Measure` followed by `delay_ms 250` ensure the single-shot I2C measurement (which captures both temperature and humidity) and ADC conversion are complete before values are formatted.
+  2. Explicit `publishFloat` calls for `"temperature"`, `"humidity"`, and `"voltage"` alongside `publishChannels` ensure all topic formats are broadcast.
+  3. `delay_s 2` ensures the full TCP packet exchange (Wi-Fi frame transmission and MQTT PUBACK) completes across all channels before the radio is powered down.
 ### Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
 
 Because the sensor is in low-power deep sleep for 99.7% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
