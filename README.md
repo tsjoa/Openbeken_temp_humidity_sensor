@@ -14,7 +14,7 @@ Comprehensive documentation for flashing, pinout configuration, Home Assistant M
 | **Power Supply** | 2x AAA Batteries (2.2V min to 3.0V max) |
 | **Status LED** | Red LED on **P26** (Active-High: 0V = OFF, 3.3V = ON) |
 | **Pair / Wake Button**| Momentary Tactile Switch on **P20** (Verified active-low GPIO) |
-| **Sensor Power Switch**| Transistor switch on **P17** (Active-High: 3.3V powers the I2C bus & ADC divider) |
+| **Sensor Power Switch**| Transistor switch on **P17** (Active-High: powers ADC divider network) |
 | **Battery ADC** | Resistor divider connected to **P23 (ADC3)** |
 | **Profile Slug** | `tuya-generic-temperature-and-humidity-sensor-v1.1.17` |
 
@@ -71,32 +71,31 @@ The hardware pinout extracted from the factory Tuya device profile (`tuya-generi
 | :--- | :--- | :--- | :--- | :--- |
 | **P7** | `SHT3X_SCK` | 49 | — | I2C Clock |
 | **P8** | `SHT3X_SDA` | 48 | **Ch 1, Ch 2** | I2C Data (Channel 1 = Temp, Channel 2 = Humidity) |
-| **P17**| `AlwaysHigh` | 34 | — | Sensor & Battery ADC Power Rail Switch |
-| **P20**| `Btn_n` / `DoorSnsrWSleep` | 4 / 58 | **Ch 0** | Physical Button (Verified on P20) |
-| **P23**| `BAT_ADC` | 60 | **Ch 3** | Battery Voltage ADC (linked to Channel 3) |
+| **P17**| `BAT_Relay` | 51 | — | Battery ADC Resistor Divider Switch (Active-High, isolates divider to prevent parasitic sleep drain) |
+| **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Physical Button & Wake Pin (Active-Low GPIO) |
+| **P23**| `BAT_ADC` | 60 | — | Battery Voltage ADC (ADC3, monitored by OpenBeken Battery driver) |
 | **P26**| `AlwaysLow` | 35 | — | Red Status LED (0V = OFF, prevents parasitic drain) |
 | *All others* | ` ` (None) | 0 | — | Unassigned / High Impedance |
 
 ### Channel Types
 * **Channel 1**: `Temperature_div10` (interprets raw `267` as `26.7 °C`)
 * **Channel 2**: `Humidity` (interprets raw `36` as `36 %`)
-* **Channel 3**: `Voltage` (Battery ADC voltage)
+*(Note: Channel 3 is not used for battery/voltage because the OpenBeken `Battery` driver manages ADC sampling, divider scaling, and MQTT publishing directly to `voltage` and `battery` topics).*
 
 ### OpenBeken CLI Configuration Commands
+```bash
 # Pin roles and channels
 SetPinRole 7 SHT3X_SCK
 SetPinRole 8 SHT3X_SDA
 SetPinChannel 8 1 2
-SetPinRole 17 AlwaysHigh
+SetPinRole 17 BAT_Relay
 SetPinRole 20 DoorSnsrWSleep
 SetPinRole 23 BAT_ADC
-SetPinChannel 23 3
 SetPinRole 26 AlwaysLow
 
 # Channel formatting
 SetChannelType 1 Temperature_div10
 SetChannelType 2 Humidity
-SetChannelType 3 Voltage
 
 # Persist to flash
 save
@@ -135,7 +134,7 @@ curl -s "http://192.168.20.20/ha_discovery?prefix=homeassistant"
 | `switch.obk55a19113_stay_awake` | **Stay Awake** | Switch | Toggles between Deep Sleep (OFF) and Continuous Awake Mode (ON) |
 | `sensor.obk55a19113_temperature` | Temperature | Sensor | Ambient Temperature (SHT30) in `°C` |
 | `sensor.obk55a19113_humidity` | Humidity | Sensor | Ambient Humidity (SHT30) in `%` |
-| `sensor.obk55a19113_voltage` | Voltage | Sensor | Battery ADC Voltage in `mV` |
+| `sensor.obk55a19113_voltage` | Voltage | Sensor | Battery Pack Voltage in `mV` |
 | `sensor.obk55a19113_battery` | Battery | Sensor | Battery Level in `%` |
 | `sensor.obk55a19113_temperature_3`| Temperature (Diag) | Sensor | Internal SoC Die Temperature in `°C` |
 | `sensor.obk55a19113_rssi` | RSSI | Sensor | Wi-Fi Signal Strength in `dBm` |
@@ -171,7 +170,7 @@ SetFlag 37 1
 ; Start drivers
 startDriver SHT3X
 startDriver Battery
-Battery_Setup 2000 3000 2.29 2400 4096
+Battery_Setup 2000 3000 2.0 2400 4096
 
 ; Link physical Pin 20 button directly to Channel 5 (Stay Awake switch)
 addEventHandler OnClick 20 "toggleChannel 5"
@@ -182,8 +181,7 @@ DSEdge 1 20
 waitFor WiFiState 4
 waitFor MQTTState 1
 
-; Capture fresh sensor and battery readings
-battery_measure
+; Capture fresh sensor readings
 SHT_Measure
 delay_ms 250
 
@@ -191,9 +189,8 @@ delay_ms 250
 publishChannels
 publishFloat "temperature" $CH1
 publishFloat "humidity" $CH2
-publishFloat "voltage" $CH3
 
-; Allow TCP/MQTT network buffer to flush over RF before powering off radio
+; Allow drv_battery Batt_OnEverySecond (tick 2) to complete and TCP/MQTT buffers to flush over RF
 delay_s 2
 
 ; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
@@ -202,15 +199,12 @@ if $CH5==0 then PinDeepSleep 600
 
 ### Critical Timing & Buffer Pitfalls
 
-#### Why Auto-Wake Readings (Temperature & Humidity) Were Stale (Network TX & Topic Mapping)
-* **The Symptom**: When waking up automatically every 10 minutes, the sensor reported the exact same temperature and/or humidity as the previous cycle, but pressing the button yielded fresh readings.
-* **The Cause**:
-  1. **Network TX Buffer Race**: `publishChannels` enqueues MQTT packets into lwIP's TCP transmit buffer asynchronously. Without a delay, `PinDeepSleep` was executed microseconds later, powering off the 2.4GHz RF transceiver before the full TCP packet stream (specifically subsequent humidity and voltage packets) left the device over Wi-Fi. Mosquitto never received the newer packets, leaving Home Assistant displaying the last retained value.
-  2. **Topic Binding Differences**: Home Assistant discovery configurations can bind sensor entities to either generic numeric channel topics (`tuya_temp_hum/1/get`, `tuya_temp_hum/2/get`) or explicit named topics (`tuya_temp_hum/temperature/get`, `tuya_temp_hum/humidity/get`). Relying on only one mechanism can cause Home Assistant to miss channel updates if the discovery schema expects named topics.
-* **The Fix**:
-  1. `battery_measure` & `SHT_Measure` followed by `delay_ms 250` ensure the single-shot I2C measurement (which captures both temperature and humidity) and ADC conversion are complete before values are formatted.
-  2. Explicit `publishFloat` calls for `"temperature"`, `"humidity"`, and `"voltage"` alongside `publishChannels` ensure all topic formats are broadcast.
-  3. `delay_s 2` ensures the full TCP packet exchange (Wi-Fi frame transmission and MQTT PUBACK) completes across all channels before the radio is powered down.
+#### Why Voltage and Battery Readings Failed
+1. **Voltage Divider Multiplier**: The 2x AAA battery pack provides ~2.72V total, divided by a 1:1 resistor network to ~1.36V at ADC Pin 23. Because Pin 17 was previously set to `AlwaysHigh` rather than `BAT_Relay` and the divider ratio was not locked in, OpenBeken's battery driver defaulted `g_vdivider` to `1.0`, reporting raw ADC voltage (1366 mV) instead of battery pack voltage (2732 mV).
+2. **Battery Level Clamping to 0%**: OpenBeken calculates percentage using `(measured_voltage - minbatt) / (maxbatt - minbatt) * 100`. Because the measured voltage (1366 mV) was far below `minbatt` (2000 mV), the result was negative and clamped to 0%. Setting the divider multiplier to `2.0` yields 2732 mV, which correctly resolves to ~73% battery level.
+3. **Topic Collision with `$CH3`**: An explicit `publishFloat "voltage" $CH3` command was running alongside `drv_battery`. Because `BAT_ADC` does not write to Channel 3, `$CH3` is `0.000000`. This raced with `drv_battery`'s publication on topic `tuya_temp_hum/voltage/get`, periodically overwriting the valid voltage reading with 0.000000. Removing `publishFloat "voltage" $CH3` lets `drv_battery` publish the accurate voltage without interference.
+4. **Driver Tick Delay (`delay_s 2`)**: OpenBeken's battery driver executes `Batt_Measure()` on second 2 of uptime (`Batt_OnEverySecond`). Adding `delay_s 2` ensures that both the battery driver has completed its measurement and all MQTT packets have been acknowledged by the broker before entering deep sleep.
+
 ### Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
 
 Because the sensor is in low-power deep sleep for 99.7% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
@@ -223,7 +217,7 @@ Because the sensor is in low-power deep sleep for 99.7% of the time, mode switch
 
 #### 2. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
 1. In Home Assistant, toggle the **"Stay Awake"** switch to **`ON`** (the setting is retained on the MQTT broker).
-2. **Remove and reinsert one battery** to power-cycle the sensor.
+2. **Remove and reinsert one battery** (or hold down the physical button for 3–5 seconds during boot).
 3. When the sensor boots and connects to MQTT, it reads `Stay Awake == ON`, skips deep sleep, and **stays online continuously at `http://192.168.20.20/`** with the full OpenBeken web panel and OTA interface active.
 4. When finished with configuration or firmware updates:
    * Toggle **"Stay Awake"** back to **`OFF`** in Home Assistant.
