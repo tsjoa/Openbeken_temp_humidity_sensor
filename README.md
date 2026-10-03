@@ -1,6 +1,6 @@
 # Tuya Temperature & Humidity Sensor (BK7231N / SHT30) - OpenBeken Guide
 
-Comprehensive documentation for flashing, pinout configuration, Home Assistant MQTT integration, and battery deep-sleep optimization for the **Tuya Generic Temperature and Humidity Sensor (v1.1.17)** based on the **Beken BK7231N (CBU)** microcontroller.
+Comprehensive documentation for flashing, pinout configuration, Home Assistant MQTT integration, battery chemistry calibration, and deep-sleep optimization for the **Tuya Generic Temperature and Humidity Sensor (v1.1.17)** based on the **Beken BK7231N (CBU)** microcontroller.
 
 ---
 
@@ -11,9 +11,9 @@ Comprehensive documentation for flashing, pinout configuration, Home Assistant M
 | **Microcontroller** | Beken BK7231N (Tuya CBU Module) |
 | **Flash Memory** | 2048 KiB (2 MB) |
 | **Sensor IC** | Sensirion SHT30 / SHT3x (I2C) |
-| **Power Supply** | 2x AAA Batteries (2.2V min to 3.0V max) |
+| **Power Supply** | 2x AAA Batteries (Alkaline: 2.0–3.0V, or NiMH Rechargeable: 2.0–2.5V) |
 | **Status LED** | Red LED on **P26** (Active-High: 0V = OFF, 3.3V = ON) |
-| **Pair / Wake Button**| Momentary Tactile Switch on **P14** or **P20** (hardware revision dependent) |
+| **Pair / Wake Button**| Momentary Tactile Switch on **P20** (Verified active-low GPIO via `P20_HOLD`) |
 | **Sensor Power Switch**| Transistor switch on **P17** (Active-High: powers ADC divider network) |
 | **Battery ADC** | Resistor divider connected to **P23 (ADC3)** |
 | **Profile Slug** | `tuya-generic-temperature-and-humidity-sensor-v1.1.17` |
@@ -66,14 +66,14 @@ curl -s "http://192.168.20.20/index?restart=1"
 
 ## 3. OpenBeken Pinout & Channel Mapping
 
-The hardware pinout extracted from the factory Tuya device profile (`tuya-generic-temperature-and-humidity-sensor-v1.1.17`):
+The hardware pinout verified on the physical hardware:
 | Pin | OpenBeken Role | Role ID | Channels | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **P7** | `SHT3X_SCK` | 49 | — | I2C Clock |
 | **P8** | `SHT3X_SDA` | 48 | **Ch 1, Ch 2** | I2C Data (Channel 1 = Temp, Channel 2 = Humidity) |
-| **P14**| `DoorSnsrWSleep` | 58 | **Ch 0** | Tactile Switch on PCB rev B (Active-Low GPIO) |
+| **P14**| `DoorSnsrWSleep` | 58 | **Ch 0** | Optional wake input on PCB rev B |
 | **P17**| `BAT_Relay` | 51 | — | Battery ADC Resistor Divider Switch (Active-High, isolates divider to prevent parasitic sleep drain) |
-| **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Tactile Switch on PCB rev A (Active-Low GPIO) |
+| **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Physical Reset / Pair Button (Verified active-low GPIO via `P20_HOLD`) |
 | **P23**| `BAT_ADC` | 60 | — | Battery Voltage ADC (ADC3, monitored by OpenBeken Battery driver) |
 | **P26**| `AlwaysLow` | 35 | — | Red Status LED (0V = OFF, prevents parasitic drain) |
 | *All others* | `None` | 0 | — | Unassigned / High Impedance |
@@ -155,7 +155,43 @@ Enabling **Flag 35** instructs OpenBeken to omit `availability_topic` (`avty_t`)
 
 ---
 
-## 5. Power Consumption, Thermals, and Deep Sleep
+## 5. Battery Chemistry Calibration: NiMH vs. Alkaline
+
+The Beken BK7231N ADC measures battery voltage through a 1:1 resistor voltage divider on **Pin 23 (ADC3)**. The voltage is configured using `Battery_Setup`:
+
+```text
+Battery_Setup [minbatt] [maxbatt] [V_divider] [Vref] [AD Bits]
+```
+
+* **`minbatt`**: Minimum operational voltage in mV (0% battery cut-off).
+* **`maxbatt`**: Maximum operational voltage in mV (100% full charge).
+* **`V_divider`**: Resistor voltage divider ratio (`2.0` for 1:1 equal resistors).
+* **`Vref`**: ADC reference voltage (`2400` mV).
+* **`AD Bits`**: ADC resolution (`4096` for 12-bit ADC).
+
+### Chemistry Profiles:
+
+1. **Rechargeable NiMH Batteries (2x AAA in Series)**:
+   * **Nominal Voltage**: $1.2\text{V}$ per cell ($2.4\text{V}$ total).
+   * **Full Charge**: $\approx 1.25\text{V} - 1.30\text{V}$ per cell (**$2500\text{ mV}$** total).
+   * **Depleted / Cutoff**: $\approx 1.0\text{V}$ per cell (**$2000\text{ mV}$** total).
+   * **Command**:
+     ```text
+     Battery_Setup 2000 2500 2.0 2400 4096
+     ```
+   * *Why fresh NiMH batteries previously reported 40–50%*: When calibrated for 3.0V alkaline, a freshly charged 2.45V NiMH pack evaluates to $(2450 - 2000) / (3000 - 2000) = 45\%$. With the 2500 mV ceiling, it correctly reports **$90\text{–}95\%$**.
+
+2. **Standard Alkaline Batteries (2x AAA in Series)**:
+   * **Full Charge**: $1.5\text{V} - 1.6\text{V}$ per cell (**$3000\text{ mV}$** total).
+   * **Depleted / Cutoff**: $1.0\text{V}$ per cell (**$2000\text{ mV}$** total).
+   * **Command**:
+     ```text
+     Battery_Setup 2000 3000 2.0 2400 4096
+     ```
+
+---
+
+## 6. Power Consumption, Thermals, and Deep Sleep
 
 ### The Always-On vs Deep Sleep Physics
 * In **Always-On** mode, the Wi-Fi transceiver and CPU run 24/7, drawing **80–100 mA** continuous current ($~0.25\text{ W}$). On 2× AAA batteries (1000 mAh), the batteries are completely drained in **12–24 hours**.
@@ -179,7 +215,8 @@ SetFlag 37 1    ; Fast connect (caches BSSID and RF channel in flash to skip 13-
 ; Start drivers
 startDriver SHT3X
 startDriver Battery
-Battery_Setup 2000 3000 2.0 2400 4096
+; Calibrated for 2x AAA NiMH rechargeable batteries (2000mV to 2500mV):
+Battery_Setup 2000 2500 2.0 2400 4096
 
 ; Link physical button to Channel 5 (Stay Awake switch) - maps both P14 and P20
 addEventHandler OnClick 14 "toggleChannel 5"
@@ -218,23 +255,27 @@ if $CH5==0 then PinDeepSleep 1800
 2. **Reduced Awake Duration**: Lowered from ~4.5 seconds to **~1.8–2.0 seconds** per wake cycle.
 3. **Reduced Wake Frequency**: Waking every 30 minutes (48 times/day) rather than every 10 minutes (144 times/day) yields an instant **$3\times$ energy reduction**.
 4. **Isolated Resistor Divider**: Pin 17 (`BAT_Relay`) powers the voltage divider only for 10 ms during ADC sampling, eliminating parasitic drain during sleep.
-5. **Expected Battery Life**: Extends 2× AAA battery life from **12–24 hours to 4–6+ months**.
+5. **Expected Battery Life**: Extends 2× AAA NiMH battery life from **12–24 hours to 4–6+ months**.
 
 ---
 
-## 6. Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
+## 7. Operating Procedure (How to Switch Modes & Wake Up)
 
-Because the sensor is in low-power deep sleep for 99.8% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
+Because the sensor is in low-power deep sleep for 99.8% of the time, mode switching is controlled via the Home Assistant switch and the physical switch:
 
-#### 1. Normal Battery Operation (Deep Sleep Mode - 4 to 6+ Months Battery Life):
+#### 1. Waking the Sensor from Deep Sleep:
+* **The 1-Second Hold Rule**: The BK7231N deep sleep wake interrupt is routed to **Pin 20** through an internal low-power analog comparator filter. Quick micro-taps (< 150 ms) are rejected as electrical noise. **Press and hold the button for 1 to 2 seconds** to reliably wake the device.
+* **The Rail Capacitor Discharge Rule**: When replacing or reseating batteries, the board's decoupling capacitors take **30 to 45 seconds** to discharge at 25 µA. Pulling the battery for only 2 seconds causes brownout latchup rather than a clean Power-On Reset. **To cold-boot instantly: remove one battery, hold down the reset button for 5 seconds to drain the rail, then reinsert the battery.**
+
+#### 2. Normal Battery Operation (Deep Sleep Mode - 4 to 6+ Months Battery Life):
 1. In Home Assistant, ensure the **"Stay Awake"** switch is set to **`OFF`**.
 2. The sensor sleeps in low power ($~25\ \mu\text{A}$, completely cool to the touch).
-3. The sensor wakes automatically on its internal timer every **30 minutes** (or immediately when the button on Pin 14/20 is clicked) to refresh readings in Home Assistant. All dashboard cards remain visible continuously.
+3. The sensor wakes automatically on its internal timer every **30 minutes** (or immediately when the button on Pin 20 is held for 1–2s) to refresh readings in Home Assistant. All dashboard cards remain visible continuously.
 
-#### 2. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
+#### 3. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
 1. In Home Assistant, toggle the **"Stay Awake"** switch to **`ON`** (the setting is retained on the MQTT broker).
-2. **Remove and reinsert one battery** (or hold down the physical button for 3–5 seconds during boot).
+2. **Remove one battery, hold the button for 5s to discharge, and reinsert** (or hold down the physical button for 3–5 seconds during boot).
 3. When the sensor boots and connects to MQTT, it reads `Stay Awake == ON`, skips deep sleep, and **stays online continuously at `http://192.168.20.20/`** with the full OpenBeken web panel and OTA interface active.
 4. When finished with configuration or firmware updates:
    * Toggle **"Stay Awake"** back to **`OFF`** in Home Assistant.
-   * Remove and reinsert the battery to place the sensor back into battery-saving Deep Sleep mode.
+   * Remove and reinsert the battery (with capacitor discharge) to place the sensor back into battery-saving Deep Sleep mode.
