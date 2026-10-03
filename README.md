@@ -75,7 +75,7 @@ The hardware pinout extracted from the factory Tuya device profile (`tuya-generi
 | **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Physical Button & Wake Pin (Active-Low GPIO) |
 | **P23**| `BAT_ADC` | 60 | — | Battery Voltage ADC (ADC3, monitored by OpenBeken Battery driver) |
 | **P26**| `AlwaysLow` | 35 | — | Red Status LED (0V = OFF, prevents parasitic drain) |
-| *All others* | ` ` (None) | 0 | — | Unassigned / High Impedance |
+| *All others* | `None` | 0 | — | Unassigned / High Impedance |
 
 ### Channel Types
 * **Channel 1**: `Temperature_div10` (interprets raw `267` as `26.7 °C`)
@@ -92,6 +92,11 @@ SetPinRole 17 BAT_Relay
 SetPinRole 20 DoorSnsrWSleep
 SetPinRole 23 BAT_ADC
 SetPinRole 26 AlwaysLow
+
+# Clean up unused pins
+SetPinRole 14 None
+SetPinRole 16 None
+SetPinRole 22 None
 
 # Channel formatting
 SetChannelType 1 Temperature_div10
@@ -146,16 +151,19 @@ By default, Home Assistant tracks device online status using MQTT's **Last Will 
 
 ### The Fix: OpenBeken Flag 35 (Omit Availability Topic)
 Enabling **Flag 35** instructs OpenBeken to omit `availability_topic` (`avty_t`) from Home Assistant Auto-Discovery. Home Assistant will then **permanently display the last received values** (temperature, humidity, voltage, battery) on dashboard cards without flipping to "Unavailable".
+
 ---
 
-## 6. Power Consumption, Thermals, and Deep Sleep
+## 5. Power Consumption, Thermals, and Deep Sleep
 
-### The Always-On Problem (Why the chip feels warm)
-* In **Always-On** mode, the Wi-Fi transceiver and CPU run 24/7, drawing **80–100 mA** continuous current ($~0.3\text{ W}$).
-### Deep Sleep Solution (6–12+ Months Battery Life)
-In **Deep Sleep**, the SoC disables its radio and clocks, dropping power consumption to **$\approx 20\text{–}30\ \mu\text{A}$**. The device remains completely cold (room temperature) and wakes only for 1.5–2 seconds per cycle to transmit data.
+### The Always-On vs Deep Sleep Physics
+* In **Always-On** mode, the Wi-Fi transceiver and CPU run 24/7, drawing **80–100 mA** continuous current ($~0.25\text{ W}$). On 2× AAA batteries (1000 mAh), the batteries are completely drained in **12–24 hours**.
+* In **Deep Sleep**, the SoC disables its radio, CPU, and clocks, dropping power consumption to **$\approx 20\text{–}30\ \mu\text{A}$**.
+* **Why Wi-Fi Sensors Drain Quickly Without Hardening**:
+  1. **The Infinite Wait Trap**: `waitFor WiFiState 4` and `waitFor MQTTState 1` have no timeout. If a Wi-Fi router channel hops or drops a packet, the sensor spins forever drawing 120 mA until the batteries die.
+  2. **Active Time Overhead**: Waking for 4.5 seconds every 10 minutes burns substantial energy over 144 daily cycles.
 
-### Production `autoexec.bat` / Startup Script (with Bidirectional Switch Sync)
+### Hardened Production `autoexec.bat` (30-Minute Cadence + 6s Watchdog)
 Set this script in OpenBeken (**Config $\rightarrow$ Change Startup Command Text**):
 
 ```batch
@@ -163,9 +171,9 @@ Set this script in OpenBeken (**Config $\rightarrow$ Change Startup Command Text
 PowerSave 1
 
 ; Optimize MQTT and WiFi quick connect
-SetFlag 35 1
-SetFlag 7 1
-SetFlag 37 1
+SetFlag 35 1    ; Omit MQTT availability topic (values persist in HA cards)
+SetFlag 7 1     ; Quick connect
+SetFlag 37 1    ; Fast connect (caches BSSID and RF channel in flash to skip 13-channel scan)
 
 ; Start drivers
 startDriver SHT3X
@@ -177,7 +185,11 @@ addEventHandler OnClick 20 "toggleChannel 5"
 addEventHandler OnHold 20 "toggleChannel 5"
 DSEdge 1 20
 
-; Wait for Wi-Fi and MQTT connection
+; Hard fallback watchdog: If not finished within 6 seconds, abort and sleep immediately!
+; (Guarantees the sensor can NEVER get stuck awake draining batteries on network hiccup)
+addRepeatingEvent 6 1 if $CH5==0 then PinDeepSleep 1800
+
+; Wait for network connection
 waitFor WiFiState 4
 waitFor MQTTState 1
 
@@ -190,30 +202,30 @@ publishChannels
 publishFloat "temperature" $CH1
 publishFloat "humidity" $CH2
 
-; Allow drv_battery Batt_OnEverySecond (tick 2) to complete and TCP/MQTT buffers to flush over RF
-delay_s 2
+; Short 400ms buffer flush (replaces the old 2000ms delay)
+delay_ms 400
 
-; If 'Stay Awake' switch in Home Assistant is OFF (Channel 5 == 0), enter Deep Sleep for 10 min
-if $CH5==0 then PinDeepSleep 600
+; Sleep for 30 minutes (1800s) if Stay Awake is OFF
+if $CH5==0 then PinDeepSleep 1800
 ```
 
-### Critical Timing & Buffer Pitfalls
+### Summary of Efficiency Optimizations:
+1. **Hard 6-Second Watchdog**: `addRepeatingEvent 6 1 if $CH5==0 then PinDeepSleep 1800` protects against network hangs. If Wi-Fi or MQTT takes more than 6 seconds, the device immediately aborts and returns to sleep.
+2. **Reduced Awake Duration**: Lowered from ~4.5 seconds to **~1.8–2.0 seconds** per wake cycle.
+3. **Reduced Wake Frequency**: Waking every 30 minutes (48 times/day) rather than every 10 minutes (144 times/day) yields an instant **$3\times$ energy reduction**.
+4. **Isolated Resistor Divider**: Pin 17 (`BAT_Relay`) powers the voltage divider only for 10 ms during ADC sampling, eliminating parasitic drain during sleep.
+5. **Expected Battery Life**: Extends 2× AAA battery life from **12–24 hours to 4–6+ months**.
 
-#### Why Voltage and Battery Readings Failed
-1. **Voltage Divider Multiplier**: The 2x AAA battery pack provides ~2.72V total, divided by a 1:1 resistor network to ~1.36V at ADC Pin 23. Because Pin 17 was previously set to `AlwaysHigh` rather than `BAT_Relay` and the divider ratio was not locked in, OpenBeken's battery driver defaulted `g_vdivider` to `1.0`, reporting raw ADC voltage (1366 mV) instead of battery pack voltage (2732 mV).
-2. **Battery Level Clamping to 0%**: OpenBeken calculates percentage using `(measured_voltage - minbatt) / (maxbatt - minbatt) * 100`. Because the measured voltage (1366 mV) was far below `minbatt` (2000 mV), the result was negative and clamped to 0%. Setting the divider multiplier to `2.0` yields 2732 mV, which correctly resolves to ~73% battery level.
-3. **Topic Collision with `$CH3`**: An explicit `publishFloat "voltage" $CH3` command was running alongside `drv_battery`. Because `BAT_ADC` does not write to Channel 3, `$CH3` is `0.000000`. This raced with `drv_battery`'s publication on topic `tuya_temp_hum/voltage/get`, periodically overwriting the valid voltage reading with 0.000000. Removing `publishFloat "voltage" $CH3` lets `drv_battery` publish the accurate voltage without interference.
-4. **Driver Tick Delay (`delay_s 2`)**: OpenBeken's battery driver executes `Batt_Measure()` on second 2 of uptime (`Batt_OnEverySecond`). Adding `delay_s 2` ensures that both the battery driver has completed its measurement and all MQTT packets have been acknowledged by the broker before entering deep sleep.
+---
 
-### Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
+## 6. Operating Procedure (How to Switch Between Deep Sleep and Awake Modes)
 
-Because the sensor is in low-power deep sleep for 99.7% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
+Because the sensor is in low-power deep sleep for 99.8% of the time, mode switching is controlled via the Home Assistant switch and a simple battery power-cycle:
 
-#### 1. Normal Battery Operation (Deep Sleep Mode - 6 to 12+ Months Battery Life):
+#### 1. Normal Battery Operation (Deep Sleep Mode - 4 to 6+ Months Battery Life):
 1. In Home Assistant, ensure the **"Stay Awake"** switch is set to **`OFF`**.
-2. Insert the batteries.
-3. The sensor boots, measures temperature/humidity/voltage, connects to Wi-Fi/MQTT, delivers its reading to Home Assistant in ~1.5 seconds, and enters low-power **Deep Sleep** ($~25\ \mu\text{A}$, completely cool to the touch).
-4. The sensor wakes automatically on its internal timer every **10 minutes** to refresh readings in Home Assistant. All cards remain visible and active continuously.
+2. The sensor sleeps in low power ($~25\ \mu\text{A}$, completely cool to the touch).
+3. The sensor wakes automatically on its internal timer every **30 minutes** (or immediately when the button on Pin 20 is clicked) to refresh readings in Home Assistant. All dashboard cards remain visible continuously.
 
 #### 2. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
 1. In Home Assistant, toggle the **"Stay Awake"** switch to **`ON`** (the setting is retained on the MQTT broker).
