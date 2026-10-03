@@ -209,8 +209,7 @@ PowerSave 1
 
 ; Optimize MQTT and WiFi quick connect
 SetFlag 35 1    ; Omit MQTT availability topic (values persist in HA cards)
-SetFlag 7 1     ; Quick connect
-SetFlag 37 1    ; Fast connect (caches BSSID and RF channel in flash to skip 13-channel scan)
+SetFlag 7 1     ; Quick connect (fast MQTT connect)
 
 ; Start drivers
 startDriver SHT3X
@@ -252,10 +251,11 @@ if $CH5==0 then PinDeepSleep 1800
 
 ### Summary of Efficiency Optimizations:
 1. **Hard 6-Second Watchdog**: `addRepeatingEvent 6 1 if $CH5==0 then PinDeepSleep 1800` protects against network hangs. If Wi-Fi or MQTT takes more than 6 seconds, the device immediately aborts and returns to sleep.
-2. **Reduced Awake Duration**: Lowered from ~4.5 seconds to **~1.8–2.0 seconds** per wake cycle.
-3. **Reduced Wake Frequency**: Waking every 30 minutes (48 times/day) rather than every 10 minutes (144 times/day) yields an instant **$3\times$ energy reduction**.
-4. **Isolated Resistor Divider**: Pin 17 (`BAT_Relay`) powers the voltage divider only for 10 ms during ADC sampling, eliminating parasitic drain during sleep.
-5. **Expected Battery Life**: Extends 2× AAA NiMH battery life from **12–24 hours to 4–6+ months**.
+2. **Standard WPA2 Handshake (Flag 37 Disabled)**: Experimental Fast Connect (Flag 37) can cause WPA 4-way handshake failures on OpenWrt/hostapd routers. Using standard handshake ensures sub-second association without stalls.
+3. **Reduced Awake Duration**: Lowered from ~4.5 seconds to **~1.8–2.0 seconds** per wake cycle.
+4. **Reduced Wake Frequency**: Waking every 30 minutes (48 times/day) rather than every 10 minutes (144 times/day) yields an instant **$3\times$ energy reduction**.
+5. **Isolated Resistor Divider**: Pin 17 (`BAT_Relay`) powers the voltage divider only for 10 ms during ADC sampling, eliminating parasitic drain during sleep.
+6. **Expected Battery Life**: Extends 2× AAA NiMH battery life from **12–24 hours to 4–6+ months**.
 
 ---
 
