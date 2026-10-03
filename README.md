@@ -13,7 +13,7 @@ Comprehensive documentation for flashing, pinout configuration, Home Assistant M
 | **Sensor IC** | Sensirion SHT30 / SHT3x (I2C) |
 | **Power Supply** | 2x AAA Batteries (2.2V min to 3.0V max) |
 | **Status LED** | Red LED on **P26** (Active-High: 0V = OFF, 3.3V = ON) |
-| **Pair / Wake Button**| Momentary Tactile Switch on **P20** (Verified active-low GPIO) |
+| **Pair / Wake Button**| Momentary Tactile Switch on **P14** or **P20** (hardware revision dependent) |
 | **Sensor Power Switch**| Transistor switch on **P17** (Active-High: powers ADC divider network) |
 | **Battery ADC** | Resistor divider connected to **P23 (ADC3)** |
 | **Profile Slug** | `tuya-generic-temperature-and-humidity-sensor-v1.1.17` |
@@ -71,8 +71,9 @@ The hardware pinout extracted from the factory Tuya device profile (`tuya-generi
 | :--- | :--- | :--- | :--- | :--- |
 | **P7** | `SHT3X_SCK` | 49 | — | I2C Clock |
 | **P8** | `SHT3X_SDA` | 48 | **Ch 1, Ch 2** | I2C Data (Channel 1 = Temp, Channel 2 = Humidity) |
+| **P14**| `DoorSnsrWSleep` | 58 | **Ch 0** | Tactile Switch on PCB rev B (Active-Low GPIO) |
 | **P17**| `BAT_Relay` | 51 | — | Battery ADC Resistor Divider Switch (Active-High, isolates divider to prevent parasitic sleep drain) |
-| **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Physical Button & Wake Pin (Active-Low GPIO) |
+| **P20**| `DoorSnsrWSleep` | 58 | **Ch 0** | Tactile Switch on PCB rev A (Active-Low GPIO) |
 | **P23**| `BAT_ADC` | 60 | — | Battery Voltage ADC (ADC3, monitored by OpenBeken Battery driver) |
 | **P26**| `AlwaysLow` | 35 | — | Red Status LED (0V = OFF, prevents parasitic drain) |
 | *All others* | `None` | 0 | — | Unassigned / High Impedance |
@@ -88,13 +89,13 @@ The hardware pinout extracted from the factory Tuya device profile (`tuya-generi
 SetPinRole 7 SHT3X_SCK
 SetPinRole 8 SHT3X_SDA
 SetPinChannel 8 1 2
+SetPinRole 14 DoorSnsrWSleep
 SetPinRole 17 BAT_Relay
 SetPinRole 20 DoorSnsrWSleep
 SetPinRole 23 BAT_ADC
 SetPinRole 26 AlwaysLow
 
 # Clean up unused pins
-SetPinRole 14 None
 SetPinRole 16 None
 SetPinRole 22 None
 
@@ -180,9 +181,12 @@ startDriver SHT3X
 startDriver Battery
 Battery_Setup 2000 3000 2.0 2400 4096
 
-; Link physical Pin 20 button directly to Channel 5 (Stay Awake switch)
+; Link physical button to Channel 5 (Stay Awake switch) - maps both P14 and P20
+addEventHandler OnClick 14 "toggleChannel 5"
+addEventHandler OnHold 14 "toggleChannel 5"
 addEventHandler OnClick 20 "toggleChannel 5"
 addEventHandler OnHold 20 "toggleChannel 5"
+DSEdge 1 14
 DSEdge 1 20
 
 ; Hard fallback watchdog: If not finished within 6 seconds, abort and sleep immediately!
@@ -225,7 +229,7 @@ Because the sensor is in low-power deep sleep for 99.8% of the time, mode switch
 #### 1. Normal Battery Operation (Deep Sleep Mode - 4 to 6+ Months Battery Life):
 1. In Home Assistant, ensure the **"Stay Awake"** switch is set to **`OFF`**.
 2. The sensor sleeps in low power ($~25\ \mu\text{A}$, completely cool to the touch).
-3. The sensor wakes automatically on its internal timer every **30 minutes** (or immediately when the button on Pin 20 is clicked) to refresh readings in Home Assistant. All dashboard cards remain visible continuously.
+3. The sensor wakes automatically on its internal timer every **30 minutes** (or immediately when the button on Pin 14/20 is clicked) to refresh readings in Home Assistant. All dashboard cards remain visible continuously.
 
 #### 2. Maintenance / Configuration Mode (Stay Awake Mode - Web UI Access):
 1. In Home Assistant, toggle the **"Stay Awake"** switch to **`ON`** (the setting is retained on the MQTT broker).
